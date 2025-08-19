@@ -6,6 +6,8 @@ import ProtectedRoute from '@/components/auth/ProtectedRoute'
 import AuthPage from '@/app/auth/page'
 import Navbar from '@/components/layout/Navbar'
 import Dashboard from '@/components/dashboard/Dashboard'
+import TransactionsList from '@/components/transactions/TransactionsList'
+import AccountsList from '@/components/accounts/AccountsList'
 import { motion } from 'framer-motion'
 import { Loader2 } from 'lucide-react'
 
@@ -18,27 +20,17 @@ function MainApp() {
         return <Dashboard />
       case 'transactions':
         return (
-          <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800 flex items-center justify-center">
-            <div className="text-center">
-              <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-4">
-                Transactions
-              </h2>
-              <p className="text-gray-600 dark:text-gray-400">
-                Transactions page coming soon!
-              </p>
+          <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800">
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+              <TransactionsList />
             </div>
           </div>
         )
       case 'accounts':
         return (
-          <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800 flex items-center justify-center">
-            <div className="text-center">
-              <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-4">
-                Accounts
-              </h2>
-              <p className="text-gray-600 dark:text-gray-400">
-                Accounts management coming soon!
-              </p>
+          <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800">
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+              <AccountsList />
             </div>
           </div>
         )

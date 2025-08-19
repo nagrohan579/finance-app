@@ -10,6 +10,32 @@ import { useAuth } from '@/context/AuthContext'
 import { supabase } from '@/lib/supabase'
 import { Loader2, AlertCircle } from 'lucide-react'
 
+interface Account {
+  id: string
+  name: string
+  type: string
+  balance: number
+}
+
+interface Transaction {
+  id: string
+  amount: number
+  type: 'income' | 'expense' | 'transfer'
+  category: string
+  date: string
+  notes?: string
+  accounts: {
+    name: string
+  }
+}
+
+interface Loan {
+  id: string
+  amount: number
+  outstanding: number
+  emi: number
+}
+
 interface DashboardData {
   summary: {
     totalBalance: number
@@ -22,18 +48,18 @@ interface DashboardData {
   accounts: {
     total: number
     byType: Record<string, { count: number, balance: number }>
-    list: any[]
+    list: Account[]
   }
   transactions: {
     monthlyCount: number
     spendingByCategory: Record<string, number>
-    recent: any[]
+    recent: Transaction[]
   }
   loans: {
     total: number
     totalOutstanding: number
     totalEMI: number
-    list: any[]
+    list: Loan[]
   }
   period: {
     month: string

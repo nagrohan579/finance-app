@@ -1,132 +1,174 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { supabase } from '@/lib/supabase'
+import { createClient } from '@supabase/supabase-js'
+
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!
+
+const supabase = createClient(supabaseUrl, supabaseServiceKey)
+
+async function verifyAuth(request: NextRequest) {
+  const authHeader = request.headers.get('authorization')
+  if (!authHeader?.startsWith('Bearer ')) {
+    return null
+  }
+
+  const token = authHeader.substring(7)
+  const { data: userData, error } = await supabase.auth.getUser(token)
+  
+  if (error || !userData.user) {
+    return null
+  }
+
+  return userData.user
+}
 
 export async function GET(request: NextRequest) {
   try {
-    const { data: { user }, error: authError } = await supabase.auth.getUser()
-    
-    if (authError || !user) {
+    const user = await verifyAuth(request)
+    if (!user) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
     const { searchParams } = new URL(request.url)
-    const account_id = searchParams.get('account_id')
-    const type = searchParams.get('type')
-    const start_date = searchParams.get('start_date')
-    const end_date = searchParams.get('end_date')
+    const page = parseInt(searchParams.get('page') || '1')
     const limit = parseInt(searchParams.get('limit') || '50')
-    const offset = parseInt(searchParams.get('offset') || '0')
+    const offset = (page - 1) * limit
 
-    let query = supabase
+    const { data: transactions, error } = await supabase
       .from('transactions')
       .select(`
         *,
-        accounts(name, type)
+        from_account:accounts!transactions_from_account_id_fkey(id, name, type),
+        to_account:accounts!transactions_to_account_id_fkey(id, name, type)
       `)
       .eq('user_id', user.id)
       .order('date', { ascending: false })
-      .order('created_at', { ascending: false })
       .range(offset, offset + limit - 1)
 
-    if (account_id) {
-      query = query.eq('account_id', account_id)
-    }
-    if (type) {
-      query = query.eq('type', type)
-    }
-    if (start_date) {
-      query = query.gte('date', start_date)
-    }
-    if (end_date) {
-      query = query.lte('date', end_date)
-    }
-
-    const { data: transactions, error } = await query
-
     if (error) {
-      console.error('Database error:', error)
+      console.error('Error fetching transactions:', error)
       return NextResponse.json({ error: 'Failed to fetch transactions' }, { status: 500 })
     }
 
-    return NextResponse.json({ transactions })
+    return NextResponse.json(transactions)
   } catch (error) {
-    console.error('Server error:', error)
+    console.error('Transactions API error:', error)
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }
 
 export async function POST(request: NextRequest) {
   try {
-    const { data: { user }, error: authError } = await supabase.auth.getUser()
-    
-    if (authError || !user) {
+    const user = await verifyAuth(request)
+    if (!user) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
     const body = await request.json()
-    const { account_id, amount, type, category, notes, date } = body
+    const { 
+      type, 
+      amount, 
+      description, 
+      category, 
+      date, 
+      from_account_id, 
+      to_account_id 
+    } = body
 
-    if (!account_id || !amount || !type || !category || !date) {
+    if (!type || !amount || !description || !category) {
       return NextResponse.json({ 
-        error: 'Account ID, amount, type, category, and date are required' 
+        error: 'Type, amount, description, and category are required' 
       }, { status: 400 })
     }
 
-    const validTypes = ['income', 'expense', 'transfer']
-    if (!validTypes.includes(type)) {
-      return NextResponse.json({ error: 'Invalid transaction type' }, { status: 400 })
+    if (type === 'transfer' && (!from_account_id || !to_account_id)) {
+      return NextResponse.json({ 
+        error: 'Transfer transactions require both from and to accounts' 
+      }, { status: 400 })
     }
 
-    // Verify account belongs to user
-    const { data: account, error: accountError } = await supabase
-      .from('accounts')
-      .select('id, balance')
-      .eq('id', account_id)
-      .eq('user_id', user.id)
-      .single()
-
-    if (accountError || !account) {
-      return NextResponse.json({ error: 'Account not found' }, { status: 404 })
+    if (type !== 'transfer' && !from_account_id) {
+      return NextResponse.json({ 
+        error: 'Account is required for income and expense transactions' 
+      }, { status: 400 })
     }
 
-    // Start a transaction to ensure data consistency
-    const { data: transaction, error: transactionError } = await supabase
+    // Verify accounts belong to user
+    if (from_account_id) {
+      const { data: fromAccount, error: fromError } = await supabase
+        .from('accounts')
+        .select('id')
+        .eq('id', from_account_id)
+        .eq('user_id', user.id)
+        .single()
+
+      if (fromError || !fromAccount) {
+        return NextResponse.json({ error: 'Invalid from account' }, { status: 400 })
+      }
+    }
+
+    if (to_account_id) {
+      const { data: toAccount, error: toError } = await supabase
+        .from('accounts')
+        .select('id')
+        .eq('id', to_account_id)
+        .eq('user_id', user.id)
+        .single()
+
+      if (toError || !toAccount) {
+        return NextResponse.json({ error: 'Invalid to account' }, { status: 400 })
+      }
+    }
+
+    const { data: transaction, error } = await supabase
       .from('transactions')
-      .insert({
+      .insert([{
         user_id: user.id,
-        account_id,
-        amount: parseFloat(amount),
         type,
+        amount: Math.abs(amount),
+        description,
         category,
-        notes: notes || null,
-        date
-      })
-      .select()
+        date: date || new Date().toISOString(),
+        from_account_id: from_account_id || null,
+        to_account_id: to_account_id || null
+      }])
+      .select(`
+        *,
+        from_account:accounts!transactions_from_account_id_fkey(id, name, type),
+        to_account:accounts!transactions_to_account_id_fkey(id, name, type)
+      `)
       .single()
 
-    if (transactionError) {
-      console.error('Database error:', transactionError)
+    if (error) {
+      console.error('Error creating transaction:', error)
       return NextResponse.json({ error: 'Failed to create transaction' }, { status: 500 })
     }
 
-    // Update account balance
-    const balanceChange = type === 'income' ? parseFloat(amount) : -parseFloat(amount)
-    const newBalance = account.balance + balanceChange
-
-    const { error: balanceError } = await supabase
-      .from('accounts')
-      .update({ balance: newBalance })
-      .eq('id', account_id)
-
-    if (balanceError) {
-      // If balance update fails, we should rollback the transaction
-      // For now, we'll log the error but still return the transaction
-      console.error('Balance update error:', balanceError)
+    // Update account balances
+    if (type === 'income' && from_account_id) {
+      await supabase.rpc('update_account_balance', {
+        account_id: from_account_id,
+        amount_change: amount
+      })
+    } else if (type === 'expense' && from_account_id) {
+      await supabase.rpc('update_account_balance', {
+        account_id: from_account_id,
+        amount_change: -amount
+      })
+    } else if (type === 'transfer' && from_account_id && to_account_id) {
+      await supabase.rpc('update_account_balance', {
+        account_id: from_account_id,
+        amount_change: -amount
+      })
+      await supabase.rpc('update_account_balance', {
+        account_id: to_account_id,
+        amount_change: amount
+      })
     }
 
-    return NextResponse.json({ transaction }, { status: 201 })
+    return NextResponse.json(transaction, { status: 201 })
   } catch (error) {
-    console.error('Server error:', error)
+    console.error('Transactions API error:', error)
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }

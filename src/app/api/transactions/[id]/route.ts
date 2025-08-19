@@ -1,26 +1,45 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { supabase } from '@/lib/supabase'
+import { createClient } from '@supabase/supabase-js'
 
-interface RouteParams {
-  params: { id: string }
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!
+
+const supabase = createClient(supabaseUrl, supabaseServiceKey)
+
+async function verifyAuth(request: NextRequest) {
+  const authHeader = request.headers.get('authorization')
+  if (!authHeader?.startsWith('Bearer ')) {
+    return null
+  }
+
+  const token = authHeader.substring(7)
+  const { data: userData, error } = await supabase.auth.getUser(token)
+  
+  if (error || !userData.user) {
+    return null
+  }
+
+  return userData.user
 }
 
-export async function PUT(request: NextRequest, { params }: RouteParams) {
+export async function PUT(
+  request: NextRequest,
+  { params }: { params: { id: string } }
+) {
   try {
-    const { data: { user }, error: authError } = await supabase.auth.getUser()
-    
-    if (authError || !user) {
+    const user = await verifyAuth(request)
+    if (!user) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
     const body = await request.json()
-    const { amount, type, category, notes, date } = body
+    const { type, amount, description, category, date, from_account_id, to_account_id } = body
     const transactionId = params.id
 
-    // Get existing transaction to calculate balance difference
+    // Get existing transaction
     const { data: existingTransaction, error: fetchError } = await supabase
       .from('transactions')
-      .select('*, accounts(balance)')
+      .select('*')
       .eq('id', transactionId)
       .eq('user_id', user.id)
       .single()
@@ -29,75 +48,144 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
       return NextResponse.json({ error: 'Transaction not found' }, { status: 404 })
     }
 
-    const updateData: any = {}
-    if (amount !== undefined) updateData.amount = parseFloat(amount)
-    if (type) updateData.type = type
-    if (category) updateData.category = category
-    if (notes !== undefined) updateData.notes = notes
-    if (date) updateData.date = date
-
-    const { data: transaction, error } = await supabase
-      .from('transactions')
-      .update(updateData)
-      .eq('id', transactionId)
-      .eq('user_id', user.id)
-      .select()
-      .single()
-
-    if (error) {
-      console.error('Database error:', error)
-      return NextResponse.json({ error: 'Failed to update transaction' }, { status: 500 })
-    }
-
-    // Update account balance if amount or type changed
-    if (amount !== undefined || type) {
-      const oldBalanceChange = existingTransaction.type === 'income' ? 
-        existingTransaction.amount : -existingTransaction.amount
-      const newBalanceChange = (type || existingTransaction.type) === 'income' ? 
-        (amount !== undefined ? parseFloat(amount) : existingTransaction.amount) : 
-        -(amount !== undefined ? parseFloat(amount) : existingTransaction.amount)
-      
-      const balanceDifference = newBalanceChange - oldBalanceChange
-      const currentBalance = existingTransaction.accounts.balance
-      const newBalance = currentBalance + balanceDifference
-
-      const { error: balanceError } = await supabase
-        .from('accounts')
-        .update({ balance: newBalance })
-        .eq('id', existingTransaction.account_id)
-
-      if (balanceError) {
-        console.error('Balance update error:', balanceError)
+    // Revert old balance changes
+    if (existingTransaction.type === 'income' && existingTransaction.from_account_id) {
+      await supabase.rpc('update_account_balance', {
+        account_id: existingTransaction.from_account_id,
+        amount_change: -existingTransaction.amount
+      })
+    } else if (existingTransaction.type === 'expense' && existingTransaction.from_account_id) {
+      await supabase.rpc('update_account_balance', {
+        account_id: existingTransaction.from_account_id,
+        amount_change: existingTransaction.amount
+      })
+    } else if (existingTransaction.type === 'transfer') {
+      if (existingTransaction.from_account_id) {
+        await supabase.rpc('update_account_balance', {
+          account_id: existingTransaction.from_account_id,
+          amount_change: existingTransaction.amount
+        })
+      }
+      if (existingTransaction.to_account_id) {
+        await supabase.rpc('update_account_balance', {
+          account_id: existingTransaction.to_account_id,
+          amount_change: -existingTransaction.amount
+        })
       }
     }
 
-    return NextResponse.json({ transaction })
+    // Update transaction
+    const { data: transaction, error } = await supabase
+      .from('transactions')
+      .update({
+        type: type || existingTransaction.type,
+        amount: amount !== undefined ? Math.abs(amount) : existingTransaction.amount,
+        description: description || existingTransaction.description,
+        category: category || existingTransaction.category,
+        date: date || existingTransaction.date,
+        from_account_id: from_account_id !== undefined ? from_account_id : existingTransaction.from_account_id,
+        to_account_id: to_account_id !== undefined ? to_account_id : existingTransaction.to_account_id
+      })
+      .eq('id', transactionId)
+      .eq('user_id', user.id)
+      .select(`
+        *,
+        from_account:accounts!transactions_from_account_id_fkey(id, name, type),
+        to_account:accounts!transactions_to_account_id_fkey(id, name, type)
+      `)
+      .single()
+
+    if (error) {
+      console.error('Error updating transaction:', error)
+      return NextResponse.json({ error: 'Failed to update transaction' }, { status: 500 })
+    }
+
+    // Apply new balance changes
+    const newType = type || existingTransaction.type
+    const newAmount = amount !== undefined ? Math.abs(amount) : existingTransaction.amount
+    const newFromAccountId = from_account_id !== undefined ? from_account_id : existingTransaction.from_account_id
+    const newToAccountId = to_account_id !== undefined ? to_account_id : existingTransaction.to_account_id
+
+    if (newType === 'income' && newFromAccountId) {
+      await supabase.rpc('update_account_balance', {
+        account_id: newFromAccountId,
+        amount_change: newAmount
+      })
+    } else if (newType === 'expense' && newFromAccountId) {
+      await supabase.rpc('update_account_balance', {
+        account_id: newFromAccountId,
+        amount_change: -newAmount
+      })
+    } else if (newType === 'transfer') {
+      if (newFromAccountId) {
+        await supabase.rpc('update_account_balance', {
+          account_id: newFromAccountId,
+          amount_change: -newAmount
+        })
+      }
+      if (newToAccountId) {
+        await supabase.rpc('update_account_balance', {
+          account_id: newToAccountId,
+          amount_change: newAmount
+        })
+      }
+    }
+
+    return NextResponse.json(transaction)
   } catch (error) {
-    console.error('Server error:', error)
+    console.error('Transaction update API error:', error)
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }
 
-export async function DELETE(request: NextRequest, { params }: RouteParams) {
+export async function DELETE(
+  request: NextRequest,
+  { params }: { params: { id: string } }
+) {
   try {
-    const { data: { user }, error: authError } = await supabase.auth.getUser()
-    
-    if (authError || !user) {
+    const user = await verifyAuth(request)
+    if (!user) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
     const transactionId = params.id
 
-    // Get transaction to reverse balance change
-    const { data: transaction, error: fetchError } = await supabase
+    // Get existing transaction
+    const { data: existingTransaction, error: fetchError } = await supabase
       .from('transactions')
-      .select('*, accounts(balance)')
+      .select('*')
       .eq('id', transactionId)
       .eq('user_id', user.id)
       .single()
 
-    if (fetchError || !transaction) {
+    if (fetchError || !existingTransaction) {
       return NextResponse.json({ error: 'Transaction not found' }, { status: 404 })
+    }
+
+    // Revert balance changes
+    if (existingTransaction.type === 'income' && existingTransaction.from_account_id) {
+      await supabase.rpc('update_account_balance', {
+        account_id: existingTransaction.from_account_id,
+        amount_change: -existingTransaction.amount
+      })
+    } else if (existingTransaction.type === 'expense' && existingTransaction.from_account_id) {
+      await supabase.rpc('update_account_balance', {
+        account_id: existingTransaction.from_account_id,
+        amount_change: existingTransaction.amount
+      })
+    } else if (existingTransaction.type === 'transfer') {
+      if (existingTransaction.from_account_id) {
+        await supabase.rpc('update_account_balance', {
+          account_id: existingTransaction.from_account_id,
+          amount_change: existingTransaction.amount
+        })
+      }
+      if (existingTransaction.to_account_id) {
+        await supabase.rpc('update_account_balance', {
+          account_id: existingTransaction.to_account_id,
+          amount_change: -existingTransaction.amount
+        })
+      }
     }
 
     // Delete transaction
@@ -108,26 +196,13 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
       .eq('user_id', user.id)
 
     if (error) {
-      console.error('Database error:', error)
+      console.error('Error deleting transaction:', error)
       return NextResponse.json({ error: 'Failed to delete transaction' }, { status: 500 })
-    }
-
-    // Reverse the balance change
-    const balanceChange = transaction.type === 'income' ? -transaction.amount : transaction.amount
-    const newBalance = transaction.accounts.balance + balanceChange
-
-    const { error: balanceError } = await supabase
-      .from('accounts')
-      .update({ balance: newBalance })
-      .eq('id', transaction.account_id)
-
-    if (balanceError) {
-      console.error('Balance update error:', balanceError)
     }
 
     return NextResponse.json({ message: 'Transaction deleted successfully' })
   } catch (error) {
-    console.error('Server error:', error)
+    console.error('Transaction delete API error:', error)
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }

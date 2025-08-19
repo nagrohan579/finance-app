@@ -10,11 +10,18 @@ import {
   CreditCard
 } from 'lucide-react'
 
+interface Account {
+  id: string;
+  name: string;
+  type: 'savings' | 'checking' | 'credit' | 'investment';
+  balance: number;
+}
+
 interface AccountFormProps {
   isOpen: boolean
   onClose: () => void
   onSuccess: () => void
-  account?: any // For editing existing accounts
+  account?: Account // For editing existing accounts
 }
 
 export default function AccountForm({ isOpen, onClose, onSuccess, account }: AccountFormProps) {

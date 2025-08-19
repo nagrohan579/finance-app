@@ -20,11 +20,21 @@ interface Account {
   balance: number
 }
 
+interface Transaction {
+  id: string;
+  account_id: string;
+  amount: number;
+  type: 'income' | 'expense' | 'transfer';
+  category: string;
+  notes?: string;
+  date: string;
+}
+
 interface TransactionFormProps {
-  isOpen: boolean
-  onClose: () => void
-  onSuccess: () => void
-  transaction?: any // For editing existing transactions
+  isOpen: boolean;
+  onClose: () => void;
+  onSuccess: () => void;
+  transaction?: Transaction;
 }
 
 export default function TransactionForm({ isOpen, onClose, onSuccess, transaction }: TransactionFormProps) {
